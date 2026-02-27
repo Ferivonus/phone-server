@@ -18,5 +18,5 @@ path = "src/bin/client.rs"
 required-features = ["cpal"]
 
 [features]
-default = []
+default = ["cpal"]
 cpal = ["dep:cpal"]
