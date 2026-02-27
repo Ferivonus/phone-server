@@ -1,19 +1,28 @@
 use dotenvy::dotenv;
+use futures_util::{SinkExt, StreamExt};
 use std::env;
-use std::io::{self, Read, Write};
-use std::net::TcpStream;
-use std::thread;
+use std::io::{self, Write};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
-fn main() {
-    // .env dosyasındaki ayarları yükle
+#[tokio::main]
+async fn main() {
     dotenv().ok();
-    let server_addr =
-        env::var("SERVER_ADDR").expect("HATA: .env dosyasında SERVER_ADDR bulunamadı!");
+    let mut server_addr = env::var("SERVER_ADDR").expect("HATA: SERVER_ADDR bulunamadı!");
 
-    println!("Sunucuya bağlanılıyor: {} ...", server_addr);
+    // Kullanıcı unutsa bile URL'yi Railway'e uygun hale getirelim (wss://)
+    if !server_addr.starts_with("ws://") && !server_addr.starts_with("wss://") {
+        if server_addr.contains("railway.app") || server_addr.contains("fly.dev") {
+            server_addr = format!("wss://{}", server_addr); // Canlı sunucu için güvenli websocket
+        } else {
+            server_addr = format!("ws://{}", server_addr); // Yerel test için normal websocket
+        }
+    }
 
-    // Sunucuya doğrudan TCP bağlantısı açıyoruz
-    let mut stream = match TcpStream::connect(&server_addr) {
+    println!("WebSocket Sunucusuna bağlanılıyor: {} ...", server_addr);
+
+    // Sunucuya asenkron olarak bağlan
+    let (ws_stream, _) = match connect_async(&server_addr).await {
         Ok(s) => s,
         Err(e) => {
             println!("Sunucuya bağlanılamadı: {}", e);
@@ -23,46 +32,43 @@ fn main() {
 
     println!("Bağlantı başarılı! --- Sohbet Başladı --- (Çıkmak için 'cikis' yazın)");
 
-    // Okuma ve yazma işlemlerini aynı anda yapabilmek için bağlantıyı kopyalıyoruz
-    let mut stream_clone = stream.try_clone().expect("Bağlantı kopyalanamadı");
+    let (mut sender, mut receiver) = ws_stream.split();
 
-    // 1. Gelen mesajları arka planda dinleme (Thread)
-    thread::spawn(move || {
-        let mut buffer = [0; 1024];
-        loop {
-            match stream_clone.read(&mut buffer) {
-                Ok(0) => {
-                    println!("\n[Sistem]: Sunucu bağlantıyı kapattı.");
-                    break;
-                }
-                Ok(size) => {
-                    let msg = String::from_utf8_lossy(&buffer[..size]);
-                    println!("\r[Arkadaşın]: {}", msg);
-                    print!("Sen: ");
-                    io::stdout().flush().unwrap();
-                }
-                Err(_) => break,
+    // 1. Gelen mesajları arka planda dinleme
+    tokio::spawn(async move {
+        while let Some(Ok(msg)) = receiver.next().await {
+            if msg.is_text() {
+                println!("\r[Arkadaşın]: {}", msg.to_text().unwrap());
+                print!("Sen: ");
+                io::stdout().flush().unwrap();
             }
         }
     });
 
-    // 2. Mesaj gönderme döngüsü (Ana ekran)
+    // 2. Klavyeden mesaj okuyup sunucuya gönderme
+    let stdin = tokio::io::stdin();
+    let mut reader = BufReader::new(stdin);
+    let mut line = String::new();
+
     loop {
         print!("Sen: ");
         io::stdout().flush().unwrap();
+        line.clear();
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
-        let msg = input.trim();
+        let bytes_read = reader.read_line(&mut line).await.unwrap();
+        if bytes_read == 0 {
+            break;
+        } // EOF
 
+        let msg = line.trim();
         if msg.eq_ignore_ascii_case("cikis") {
             println!("Sohbetten çıkılıyor...");
             break;
         }
 
         if !msg.is_empty() {
-            // Mesajı sunucuya iletiyoruz, sunucu da arkadaşımıza iletecek
-            let _ = stream.write_all(msg.as_bytes());
+            // Yazdığın mesajı WebSocket paketi olarak sunucuya yolla
+            let _ = sender.send(Message::Text(msg.to_string().into())).await;
         }
     }
 }

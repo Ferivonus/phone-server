@@ -1,81 +1,75 @@
+use futures_util::{SinkExt, StreamExt};
 use std::env;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use tokio::net::TcpListener;
+use tokio::sync::broadcast;
+use tokio_tungstenite::accept_async;
 
-fn main() {
-    // Railway'in vereceği portu dinliyoruz, yoksa 8080 kullanıyoruz.
+#[tokio::main]
+async fn main() {
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let addr = format!("0.0.0.0:{}", port);
 
-    // TCP Dinleyicisini başlatıyoruz
-    let listener = TcpListener::bind(&addr).expect("Port açılamadı!");
-    println!(
-        "Sohbet Sunucusu {} portunda TCP üzerinden dinliyor...",
-        addr
-    );
+    // Asenkron TCP Dinleyici başlat
+    let listener = TcpListener::bind(&addr).await.expect("Port açılamadı!");
+    println!("WebSocket Sunucusu {} portunda dinliyor...", addr);
 
-    // Bağlı kullanıcıları tutacağımız güvenli liste (Thread'ler arası paylaşım için Arc ve Mutex kullanıyoruz)
-    let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+    // Tüm istemcilere aynı anda mesaj gönderebilmek için bir yayın (broadcast) kanalı açıyoruz
+    let (tx, _rx) = broadcast::channel(100);
 
     // Sürekli olarak yeni bağlantıları bekle
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let clients_clone = Arc::clone(&clients);
-                // Her yeni kullanıcı için arka planda bağımsız bir işlem (thread) başlat
-                thread::spawn(move || {
-                    handle_client(stream, clients_clone);
-                });
-            }
-            Err(e) => println!("Bağlantı hatası: {}", e),
-        }
-    }
-}
+    while let Ok((stream, peer_addr)) = listener.accept().await {
+        let tx = tx.clone();
+        let mut rx = tx.subscribe(); // Bu istemci için bir alıcı oluştur
 
-// Her bir kullanıcının mesajlarını dinleyen fonksiyon
-fn handle_client(mut stream: TcpStream, clients: Arc<Mutex<Vec<TcpStream>>>) {
-    let peer_addr = stream.peer_addr().unwrap().to_string();
-    println!("Yeni kullanıcı bağlandı: {}", peer_addr);
+        // Her kullanıcı için arka planda yeni bir asenkron görev (task) başlat
+        tokio::spawn(async move {
+            println!("Yeni TCP bağlantısı yakalandı: {}", peer_addr);
 
-    // Yeni kullanıcıyı listeye ekle
-    {
-        let mut clients_lock = clients.lock().unwrap();
-        clients_lock.push(stream.try_clone().unwrap());
-    }
+            // Standart TCP'yi WebSocket'e yükseltiyoruz (İşte sihir burada!)
+            let ws_stream = match accept_async(stream).await {
+                Ok(ws) => ws,
+                Err(e) => {
+                    println!("WebSocket hatası: {}", e);
+                    return;
+                }
+            };
 
-    let mut buffer = [0; 1024];
+            println!("Kullanıcı WebSocket'e yükseltildi: {}", peer_addr);
 
-    // Bu kullanıcıdan gelen mesajları sürekli dinle
-    loop {
-        match stream.read(&mut buffer) {
-            Ok(0) => {
-                // Okunan veri 0 ise, kullanıcı bağlantıyı kopardı demektir
-                println!("Kullanıcı ayrıldı: {}", peer_addr);
-                break;
-            }
-            Ok(size) => {
-                // Mesajı al
-                let msg = String::from_utf8_lossy(&buffer[..size]).to_string();
+            // WebSocket'i okuyan ve yazan olarak ikiye bölüyoruz
+            let (mut sender, mut receiver) = ws_stream.split();
 
-                // Mesajı, gönderen kişi hariç diğer tüm kullanıcılara ilet (Broadcast)
-                let mut clients_lock = clients.lock().unwrap();
-                for client in clients_lock.iter_mut() {
-                    // Kendi adresimiz değilse mesajı gönder
-                    if client.peer_addr().unwrap().to_string() != peer_addr {
-                        let _ = client.write_all(msg.as_bytes());
+            loop {
+                // select! makrosu: Aynı anda hem istemciden gelen mesajı hem de
+                // diğer odalardan gelen broadcast mesajlarını dinlememizi sağlar
+                tokio::select! {
+                    msg = receiver.next() => {
+                        match msg {
+                            Some(Ok(msg)) => {
+                                if msg.is_text() {
+                                    let text = msg.to_text().unwrap();
+                                    // Mesajı diğer herkese gönderilmesi için kanala at
+                                    let broadcast_msg = format!("{}: {}", peer_addr, text);
+                                    let _ = tx.send(broadcast_msg);
+                                }
+                            }
+                            _ => break, // Kullanıcı bağlantıyı kopardı
+                        }
+                    }
+                    broadcast_msg = rx.recv() => {
+                        if let Ok(msg) = broadcast_msg {
+                            // Kendi yazdığımız mesajı kendimize geri göndermeyelim
+                            if !msg.starts_with(&peer_addr.to_string()) {
+                                // IP kısmını ayırıp sadece metni gönderiyoruz
+                                let clean_msg = msg.splitn(2, ": ").nth(1).unwrap_or(&msg);
+                                let ws_msg = tokio_tungstenite::tungstenite::protocol::Message::Text(clean_msg.to_string().into());
+                                let _ = sender.send(ws_msg).await;
+                            }
+                        }
                     }
                 }
             }
-            Err(_) => {
-                println!("Bağlantı aniden koptu: {}", peer_addr);
-                break;
-            }
-        }
+            println!("Kullanıcı ayrıldı: {}", peer_addr);
+        });
     }
-
-    // Kullanıcı çıkış yaptığında onu listeden temizle
-    let mut clients_lock = clients.lock().unwrap();
-    clients_lock.retain(|c| c.peer_addr().unwrap().to_string() != peer_addr);
 }
