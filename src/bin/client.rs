@@ -1,79 +1,68 @@
-use dotenvy::dotenv; // dotenv kütüphanesini dahil ettik
+use dotenvy::dotenv;
 use std::env;
-use std::io::{self, Write};
-use std::net::UdpSocket;
+use std::io::{self, Read, Write};
+use std::net::TcpStream;
 use std::thread;
-use std::time::Duration;
 
-fn main() -> std::io::Result<()> {
-    // Adım 1: .env dosyasını bul ve içindeki değişkenleri sisteme yükle
+fn main() {
+    // .env dosyasındaki ayarları yükle
     dotenv().ok();
+    let server_addr =
+        env::var("SERVER_ADDR").expect("HATA: .env dosyasında SERVER_ADDR bulunamadı!");
 
-    // Adım 2: SERVER_ADDR değişkenini çek. Eğer dosya yoksa veya değişken eksikse hata ver.
-    let server_addr = env::var("SERVER_ADDR")
-        .expect("HATA: .env dosyasında SERVER_ADDR bulunamadı! Lütfen kontrol edin.");
+    println!("Sunucuya bağlanılıyor: {} ...", server_addr);
 
-    println!("Yapılandırma yüklendi. Hedef Sunucu: {}", server_addr);
+    // Sunucuya doğrudan TCP bağlantısı açıyoruz
+    let mut stream = match TcpStream::connect(&server_addr) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("Sunucuya bağlanılamadı: {}", e);
+            return;
+        }
+    };
 
-    // İşletim sisteminden rastgele bir boş port alıyoruz
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    println!("Bağlantı başarılı! --- Sohbet Başladı --- (Çıkmak için 'cikis' yazın)");
 
-    // Sunucuya kayıt ol
-    println!("Sunucuya bağlanılıyor...");
-    socket.send_to(b"KAYIT", &server_addr)?;
+    // Okuma ve yazma işlemlerini aynı anda yapabilmek için bağlantıyı kopyalıyoruz
+    let mut stream_clone = stream.try_clone().expect("Bağlantı kopyalanamadı");
 
-    // Arkadaşının gelmesini bekle
-    let mut buf = [0; 1024];
-    println!("Arkadaşının bağlanması bekleniyor...");
-    let (amt, _) = socket.recv_from(&mut buf)?;
-    let peer_addr = String::from_utf8_lossy(&buf[..amt]).to_string();
-
-    println!("Eşleşme başarılı! Arkadaşının adresi: {}", peer_addr);
-
-    let socket_listener = socket.try_clone()?;
-
-    // --- BURADAN SONRASI ESKİ KOD İLE TAMAMEN AYNI ---
-    // (Mesaj dinleme thread'i ve mesaj gönderme döngüsü burada yer alacak)
-
+    // 1. Gelen mesajları arka planda dinleme (Thread)
     thread::spawn(move || {
-        let mut buf = [0; 1024];
+        let mut buffer = [0; 1024];
         loop {
-            if let Ok((amt, _src)) = socket_listener.recv_from(&mut buf) {
-                let msg = String::from_utf8_lossy(&buf[..amt]);
-                if msg != "DELIK_ACMA" {
+            match stream_clone.read(&mut buffer) {
+                Ok(0) => {
+                    println!("\n[Sistem]: Sunucu bağlantıyı kapattı.");
+                    break;
+                }
+                Ok(size) => {
+                    let msg = String::from_utf8_lossy(&buffer[..size]);
                     println!("\r[Arkadaşın]: {}", msg);
                     print!("Sen: ");
                     io::stdout().flush().unwrap();
                 }
+                Err(_) => break,
             }
         }
     });
 
-    println!("Bağlantı tüneli açılıyor (Hole Punching)...");
-    for _ in 0..3 {
-        socket.send_to(b"DELIK_ACMA", &peer_addr)?;
-        thread::sleep(Duration::from_millis(500));
-    }
-
-    println!("--- Sohbet Başladı! Mesajını yaz ve Enter'a bas. (Çıkmak için 'cikis' yaz) ---");
-
+    // 2. Mesaj gönderme döngüsü (Ana ekran)
     loop {
         print!("Sen: ");
-        io::stdout().flush()?;
+        io::stdout().flush().unwrap();
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
+        io::stdin().read_line(&mut input).unwrap();
         let msg = input.trim();
 
         if msg.eq_ignore_ascii_case("cikis") {
-            println!("Sohbetten çıkıldı.");
+            println!("Sohbetten çıkılıyor...");
             break;
         }
 
         if !msg.is_empty() {
-            socket.send_to(msg.as_bytes(), &peer_addr)?;
+            // Mesajı sunucuya iletiyoruz, sunucu da arkadaşımıza iletecek
+            let _ = stream.write_all(msg.as_bytes());
         }
     }
-
-    Ok(())
 }
