@@ -4,8 +4,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-cpal = "0.17.3"
 dotenvy = "0.15.7"
-futures-util = "0.3.32"
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
+futures-util = "0.3.32"
+# cpal'i opsiyonel yapıyoruz
+cpal = { version = "0.17.3", optional = true }
+
+[[bin]]
+name = "client"
+path = "src/bin/client.rs"
+# Client çalıştığında cpal özelliğini aktif et
+required-features = ["cpal"]
+
+[features]
+default = []
+cpal = ["dep:cpal"]
