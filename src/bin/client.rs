@@ -1,3 +1,5 @@
+#![cfg(feature = "cpal")]
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use dotenvy::dotenv;
 use futures_util::{SinkExt, StreamExt};
