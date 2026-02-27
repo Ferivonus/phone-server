@@ -1,6 +1,6 @@
 # --- 1. AŞAMA: Derleme (Builder) ---
-# Rust'ın kurulu olduğu ağır imajı alıyoruz
-FROM rust:1.75 AS builder
+# Rust'ın en GÜNCEL sürümünü alıyoruz (Hatayı çözen kısım burası)
+FROM rust:latest AS builder
 
 # Konteyner içinde kendimize bir çalışma klasörü yaratıyoruz
 WORKDIR /usr/src/phone-server
@@ -9,7 +9,6 @@ WORKDIR /usr/src/phone-server
 COPY . .
 
 # Sadece "server" kodumuzu yayınlanmaya hazır (release) formatta derliyoruz.
-# İstemci (client) kodu kendi bilgisayarımızda kalacak, Railway'e gitmesine gerek yok.
 RUN cargo build --release --bin server
 
 # --- 2. AŞAMA: Çalıştırma (Runtime) ---
