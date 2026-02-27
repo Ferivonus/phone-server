@@ -27,7 +27,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Ses ayarları yapıldı: {} Hz", config.sample_rate);
 
-    // 1. MİKROFONU DİNLE VE GÖNDER
     let (tx_audio, mut rx_audio) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
     let input_stream = input_device.build_input_stream(
         &config,
